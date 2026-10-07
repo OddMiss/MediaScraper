@@ -1,0 +1,4 @@
+cryptography>=42
+python-telegram-bot>=21,<23
+python-dotenv>=1.0
+requests>=2.31

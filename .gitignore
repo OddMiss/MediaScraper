@@ -1,0 +1,34 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Runtime output
+downloads/
+logs/
+*.part
+
+# Python caches and virtual environments
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+
+# Local tooling and editors
+.vscode/
+.idea/
+*.code-workspace
+
+# Personal Windows helpers not required by the project
+add_user_path.bat
+add_user_path_here.py
+
+# Windows artifacts
+Thumbs.db
+Desktop.ini
+
