@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from telegram import Update
+from telegram.error import NetworkError
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 from dotenv import load_dotenv
 
@@ -49,6 +50,19 @@ SOURCES = SourceRegistry(
     [XiaohongshuSource(), DouyinSource(), PipixiaSource(), TikTokSource()]
 )
 QUEUE_LOCK = asyncio.Lock()
+
+
+async def handle_application_error(
+    update: object, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Keep transient Telegram polling failures out of the error traceback."""
+    if isinstance(context.error, NetworkError):
+        LOGGER.warning(
+            "Telegram connection failed temporarily; polling will retry automatically: %s",
+            context.error,
+        )
+        return
+    LOGGER.exception("Unhandled Telegram application error", exc_info=context.error)
 
 
 def _authorised(update: Update) -> bool:
@@ -177,6 +191,7 @@ def main() -> None:
         bool(ALLOWED_USER_IDS),
     )
     application = Application.builder().token(token).build()
+    application.add_error_handler(handle_application_error)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_links))
     try:
         application.run_polling(allowed_updates=Update.ALL_TYPES)
