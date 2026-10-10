@@ -35,6 +35,30 @@ logging.basicConfig(
         logging.FileHandler(LOG_PATH, encoding="utf-8"),
     ],
 )
+
+
+class _TelegramBootstrapLogFilter(logging.Filter):
+    """Replace expected startup retry tracebacks with one concise warning."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if (
+            record.name == "telegram.ext"
+            and record.getMessage().startswith("Network Retry Loop (Bootstrap")
+        ):
+            record.levelno = logging.WARNING
+            record.levelname = "WARNING"
+            record.msg = (
+                "Telegram connection is unavailable during startup; retrying automatically."
+            )
+            record.args = ()
+            record.exc_info = None
+            record.exc_text = None
+        return True
+
+
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(_TelegramBootstrapLogFilter())
+
 # HTTP client request URLs include the Bot API token; keep them out of logs.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -194,7 +218,10 @@ def main() -> None:
     application.add_error_handler(handle_application_error)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_links))
     try:
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            bootstrap_retries=-1,
+        )
     finally:
         LOGGER.info("Bot process stopped")
 
