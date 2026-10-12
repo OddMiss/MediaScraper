@@ -5,16 +5,19 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from telegram import Update
 from telegram.error import NetworkError
-from telegram.ext import Application, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, ContextTypes, ExtBot, MessageHandler, filters
 from dotenv import load_dotenv
 
 from download_index import DownloadIndex
 from media_types import SourceError
+from polling_health import PollingHealth
 from source_registry import SourceRegistry
 from url_tools import extract_urls, title_hint_before_url
 from douyin_source import DouyinSource
@@ -74,6 +77,41 @@ SOURCES = SourceRegistry(
     [XiaohongshuSource(), DouyinSource(), PipixiaSource(), TikTokSource()]
 )
 QUEUE_LOCK = asyncio.Lock()
+POLLING_HEALTH_BY_BOT: dict[int, PollingHealth] = {}
+POLLING_HEALTH_CHECK_SECONDS = 30
+POLLING_STALL_SECONDS = 120
+POLLING_RESTART_DELAY_SECONDS = 5
+
+
+class TrackingExtBot(ExtBot):
+    """Record polling activity so a hung proxy connection can be detected."""
+
+    async def get_updates(self, *args: Any, **kwargs: Any) -> tuple[Update, ...]:
+        health = POLLING_HEALTH_BY_BOT.get(id(self))
+        if health:
+            health.record_activity()
+        try:
+            return await super().get_updates(*args, **kwargs)
+        finally:
+            if health:
+                health.record_activity()
+
+
+async def monitor_polling_health(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Rebuild the application if the background polling task no longer progresses."""
+    health = context.application.bot_data["polling_health"]
+    if not isinstance(health, PollingHealth) or not health.is_stalled(POLLING_STALL_SECONDS):
+        return
+
+    polling_task = getattr(context.application.updater, "_Updater__polling_task", None)
+    task_state = "ended" if polling_task and polling_task.done() else "stalled"
+    health.restart_requested = True
+    LOGGER.warning(
+        "Telegram polling %s for at least %s seconds; rebuilding the connection.",
+        task_state,
+        POLLING_STALL_SECONDS,
+    )
+    context.application.stop_running()
 
 
 async def handle_application_error(
@@ -203,6 +241,24 @@ async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
 
+def build_application(token: str, health: PollingHealth) -> Application:
+    bot = TrackingExtBot(token)
+    POLLING_HEALTH_BY_BOT[id(bot)] = health
+    application = Application.builder().bot(bot).build()
+    application.bot_data["polling_health"] = health
+    application.add_error_handler(handle_application_error)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_links))
+    if application.job_queue is None:
+        raise RuntimeError("Telegram polling watchdog requires the job-queue dependency.")
+    application.job_queue.run_repeating(
+        monitor_polling_health,
+        interval=POLLING_HEALTH_CHECK_SECONDS,
+        first=POLLING_HEALTH_CHECK_SECONDS,
+        name="polling-health-monitor",
+    )
+    return application
+
+
 def main() -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
@@ -214,16 +270,25 @@ def main() -> None:
         [source.name for source in SOURCES.sources],
         bool(ALLOWED_USER_IDS),
     )
-    application = Application.builder().token(token).build()
-    application.add_error_handler(handle_application_error)
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_links))
-    try:
-        application.run_polling(
-            allowed_updates=Update.ALL_TYPES,
-            bootstrap_retries=-1,
+    while True:
+        health = PollingHealth()
+        application = build_application(token, health)
+        try:
+            application.run_polling(
+                allowed_updates=Update.ALL_TYPES,
+                bootstrap_retries=-1,
+            )
+        finally:
+            POLLING_HEALTH_BY_BOT.pop(id(application.bot), None)
+
+        if not health.restart_requested:
+            LOGGER.info("Bot process stopped")
+            break
+        LOGGER.warning(
+            "Restarting Telegram application in %s seconds.",
+            POLLING_RESTART_DELAY_SECONDS,
         )
-    finally:
-        LOGGER.info("Bot process stopped")
+        time.sleep(POLLING_RESTART_DELAY_SECONDS)
 
 
 if __name__ == "__main__":
