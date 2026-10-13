@@ -8,12 +8,12 @@ from time import monotonic
 
 @dataclass
 class PollingHealth:
-    """Track completed or failed ``getUpdates`` calls using a monotonic clock."""
+    """Track successful ``getUpdates`` calls using a monotonic clock."""
 
     last_activity: float = field(default_factory=monotonic)
     restart_requested: bool = False
 
-    def record_activity(self, now: float | None = None) -> None:
+    def record_success(self, now: float | None = None) -> None:
         self.last_activity = monotonic() if now is None else now
 
     def is_stalled(self, timeout_seconds: float, now: float | None = None) -> bool:

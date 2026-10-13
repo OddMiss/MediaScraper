@@ -6,11 +6,12 @@ import asyncio
 import logging
 import os
 import time
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
-from telegram import Update
+from telegram import Message, Update
 from telegram.error import NetworkError
 from telegram.ext import Application, ContextTypes, ExtBot, MessageHandler, filters
 from dotenv import load_dotenv
@@ -65,6 +66,9 @@ for _handler in logging.getLogger().handlers:
 # HTTP client request URLs include the Bot API token; keep them out of logs.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
+# The polling watchdog runs every 30 seconds.  Keep APScheduler's routine
+# start/success messages out of the log while retaining warnings and errors.
+logging.getLogger("apscheduler.executors").setLevel(logging.WARNING)
 LOGGER = logging.getLogger("bot")
 # Read configuration next to this script.  Do not print the token or its value.
 load_dotenv(SCRIPT_DIR / ".env")
@@ -81,6 +85,9 @@ POLLING_HEALTH_BY_BOT: dict[int, PollingHealth] = {}
 POLLING_HEALTH_CHECK_SECONDS = 30
 POLLING_STALL_SECONDS = 120
 POLLING_RESTART_DELAY_SECONDS = 5
+TELEGRAM_MESSAGE_RETRY_ATTEMPTS = 3
+TELEGRAM_MESSAGE_RETRY_DELAY_SECONDS = 2
+Result = TypeVar("Result")
 
 
 class TrackingExtBot(ExtBot):
@@ -88,17 +95,14 @@ class TrackingExtBot(ExtBot):
 
     async def get_updates(self, *args: Any, **kwargs: Any) -> tuple[Update, ...]:
         health = POLLING_HEALTH_BY_BOT.get(id(self))
+        updates = await super().get_updates(*args, **kwargs)
         if health:
-            health.record_activity()
-        try:
-            return await super().get_updates(*args, **kwargs)
-        finally:
-            if health:
-                health.record_activity()
+            health.record_success()
+        return updates
 
 
 async def monitor_polling_health(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Rebuild the application if the background polling task no longer progresses."""
+    """Rebuild the application if no polling request succeeds for too long."""
     health = context.application.bot_data["polling_health"]
     if not isinstance(health, PollingHealth) or not health.is_stalled(POLLING_STALL_SECONDS):
         return
@@ -107,11 +111,54 @@ async def monitor_polling_health(context: ContextTypes.DEFAULT_TYPE) -> None:
     task_state = "ended" if polling_task and polling_task.done() else "stalled"
     health.restart_requested = True
     LOGGER.warning(
-        "Telegram polling %s for at least %s seconds; rebuilding the connection.",
-        task_state,
+        "Telegram polling has not succeeded for at least %s seconds (%s); rebuilding the connection.",
         POLLING_STALL_SECONDS,
+        task_state,
     )
     context.application.stop_running()
+
+
+async def retry_telegram_call(
+    operation: Callable[[], Awaitable[Result]], description: str
+) -> Result | None:
+    """Retry a transient outbound Telegram request without dropping its work item."""
+    for attempt in range(1, TELEGRAM_MESSAGE_RETRY_ATTEMPTS + 1):
+        try:
+            return await operation()
+        except NetworkError as exc:
+            if attempt == TELEGRAM_MESSAGE_RETRY_ATTEMPTS:
+                LOGGER.warning(
+                    "Telegram %s failed after %d attempts: %s",
+                    description,
+                    attempt,
+                    exc,
+                )
+                return None
+            delay = TELEGRAM_MESSAGE_RETRY_DELAY_SECONDS * attempt
+            LOGGER.warning(
+                "Telegram %s failed (attempt %d/%d): %s; retrying in %s seconds.",
+                description,
+                attempt,
+                TELEGRAM_MESSAGE_RETRY_ATTEMPTS,
+                exc,
+                delay,
+            )
+            await asyncio.sleep(delay)
+    return None
+
+
+async def reply_with_retry(message: Message, text: str, description: str) -> Message | None:
+    return await retry_telegram_call(lambda: message.reply_text(text), description)
+
+
+async def update_status_with_retry(status: Message | None, text: str) -> Message | None:
+    if status is None:
+        return None
+    updated = await retry_telegram_call(
+        lambda: status.edit_text(text),
+        "download status update",
+    )
+    return status if updated is not None else None
 
 
 async def handle_application_error(
@@ -137,7 +184,7 @@ async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     chat_id = update.effective_chat.id if update.effective_chat else None
     if not _authorised(update):
         LOGGER.warning("Rejected unauthorized message chat_id=%s user_id=%s", chat_id, user_id)
-        await message.reply_text("你没有使用此机器人的权限。")
+        await reply_with_retry(message, "你没有使用此机器人的权限。", "permission reply")
         return
     urls = extract_urls(message.text or "")
     if not urls:
@@ -158,7 +205,11 @@ async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not supported_urls:
         LOGGER.warning("Rejected message with no whitelisted links chat_id=%s", chat_id)
         whitelist = "、".join(SOURCES.whitelist())
-        await message.reply_text(f"链接无效：不在允许列表中。\n当前允许：{whitelist}")
+        await reply_with_retry(
+            message,
+            f"链接无效：不在允许列表中。\n当前允许：{whitelist}",
+            "invalid-link reply",
+        )
         return
 
     queue_text = f"发现 {len(supported_urls)} 个有效链接，已进入队列…"
@@ -166,7 +217,12 @@ async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         shown_urls = "\n".join(invalid_urls[:3])
         extra = "" if len(invalid_urls) <= 3 else f"\n另有 {len(invalid_urls) - 3} 条无效链接。"
         queue_text = f"以下链接无效，已跳过：\n{shown_urls}{extra}\n\n{queue_text}"
-    status = await message.reply_text(queue_text)
+    status = await reply_with_retry(message, queue_text, "queue-status reply")
+    if status is None:
+        LOGGER.warning(
+            "Could not send queue status chat_id=%s; continuing download without a status message.",
+            chat_id,
+        )
     finished: list[str] = []
     failed: list[str] = []
     providers: set[str] = set()
@@ -176,7 +232,10 @@ async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     async with QUEUE_LOCK:
         LOGGER.info("Started download batch chat_id=%s items=%d", chat_id, len(supported_urls))
         for index, url in enumerate(supported_urls, start=1):
-            await status.edit_text(f"正在处理 {index}/{len(supported_urls)}…")
+            status = await update_status_with_retry(
+                status,
+                f"正在处理 {index}/{len(supported_urls)}…",
+            )
             try:
                 platform = SOURCES.source_name(url)
                 if DOWNLOAD_INDEX.contains(url):
@@ -231,7 +290,10 @@ async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if skipped_duplicates:
         lines.append(f"已跳过 {skipped_duplicates} 条已下载链接。")
     lines.append(f"保存位置：{DOWNLOAD_DIR}")
-    await status.edit_text("\n".join(lines))
+    final_text = "\n".join(lines)
+    status = await update_status_with_retry(status, final_text)
+    if status is None:
+        await reply_with_retry(message, final_text, "final download result reply")
     LOGGER.info(
         "Finished download batch chat_id=%s files=%d failures=%d skipped_duplicates=%d",
         chat_id,
