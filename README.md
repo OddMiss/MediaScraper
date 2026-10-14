@@ -158,7 +158,6 @@ videoscraper.bat       Windows 启动入口
 requirements.txt       运行依赖
 requirements-dev.txt   开发与测试依赖
 tests/                 无需网络与真实 Token 的单元测试
-.github/workflows/     GitHub Actions 自动校验
 downloads/             本地下载结果（运行时自动创建）
 downloads/index.json   已成功下载的链接、平台、时间及文件名索引
 logs/                  每次启动生成一个时间戳日志文件
@@ -174,7 +173,7 @@ python -m compileall -q .
 python -m pytest
 ```
 
-推送至 GitHub 后，`CI` 工作流会在 Python 3.11 环境中执行相同的语法检查与单元测试。新增平台的接入约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+新增平台的接入约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 新增平台接入
 
