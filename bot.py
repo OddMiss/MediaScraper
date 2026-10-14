@@ -41,8 +41,8 @@ logging.basicConfig(
 )
 
 
-class _TelegramBootstrapLogFilter(logging.Filter):
-    """Replace expected startup retry tracebacks with one concise warning."""
+class _TelegramNetworkLogFilter(logging.Filter):
+    """Replace expected Telegram reconnection tracebacks with concise warnings."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         if (
@@ -57,11 +57,29 @@ class _TelegramBootstrapLogFilter(logging.Filter):
             record.args = ()
             record.exc_info = None
             record.exc_text = None
+        elif (
+            record.name == "telegram.ext.Updater"
+            and record.getMessage().startswith(
+                "Error while calling `get_updates` one more time to mark all fetched updates."
+            )
+        ):
+            # This request only acknowledges the final polling offset during a
+            # reconnect shutdown. The Telegram library already suppresses its
+            # failure, so avoid writing a misleading full traceback to logs.
+            record.levelno = logging.WARNING
+            record.levelname = "WARNING"
+            record.msg = (
+                "Telegram polling cleanup could not finish during reconnect; "
+                "continuing with the new connection."
+            )
+            record.args = ()
+            record.exc_info = None
+            record.exc_text = None
         return True
 
 
 for _handler in logging.getLogger().handlers:
-    _handler.addFilter(_TelegramBootstrapLogFilter())
+    _handler.addFilter(_TelegramNetworkLogFilter())
 
 # HTTP client request URLs include the Bot API token; keep them out of logs.
 logging.getLogger("httpx").setLevel(logging.WARNING)
