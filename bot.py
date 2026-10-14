@@ -14,6 +14,7 @@ from typing import Any, TypeVar
 from telegram import Message, Update
 from telegram.error import NetworkError
 from telegram.ext import Application, ContextTypes, ExtBot, MessageHandler, filters
+from telegram.request import HTTPXRequest
 from dotenv import load_dotenv
 
 from download_index import DownloadIndex
@@ -22,8 +23,10 @@ from polling_health import PollingHealth
 from source_registry import SourceRegistry
 from url_tools import extract_urls, title_hint_before_url
 from douyin_source import DouyinSource
+from netease_music_source import NeteaseMusicSource
 from pipixia_source import PipixiaSource
 from tiktok_source import TikTokSource
+from x_twitter_source import XTwitterSource
 from xiaohongshu_source import XiaohongshuSource
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -96,13 +99,24 @@ ALLOWED_USER_IDS = {int(value) for value in os.getenv("ALLOWED_USER_IDS", "").sp
 # Add each future platform implementation here.  The router keeps the bot and
 # queue independent from whether a plugin downloads video, images, or text.
 SOURCES = SourceRegistry(
-    [XiaohongshuSource(), DouyinSource(), PipixiaSource(), TikTokSource()]
+    [
+        XiaohongshuSource(),
+        DouyinSource(),
+        PipixiaSource(),
+        TikTokSource(),
+        XTwitterSource(),
+        NeteaseMusicSource(),
+    ]
 )
 QUEUE_LOCK = asyncio.Lock()
 POLLING_HEALTH_BY_BOT: dict[int, PollingHealth] = {}
 POLLING_HEALTH_CHECK_SECONDS = 30
 POLLING_STALL_SECONDS = 120
 POLLING_RESTART_DELAY_SECONDS = 5
+# Telegram gives getUpdates a one-connection pool by default.  Keep a second
+# connection available so the updater can finish an interrupted long poll
+# while its shutdown/restart request is in progress.
+TELEGRAM_GET_UPDATES_CONNECTION_POOL_SIZE = 2
 TELEGRAM_MESSAGE_RETRY_ATTEMPTS = 3
 TELEGRAM_MESSAGE_RETRY_DELAY_SECONDS = 2
 Result = TypeVar("Result")
@@ -245,6 +259,7 @@ async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     failed: list[str] = []
     providers: set[str] = set()
     provider_notices: list[str] = []
+    item_notices: list[str] = []
     skipped_duplicates = 0
     LOGGER.info("Queued download batch chat_id=%s items=%d", chat_id, len(supported_urls))
     async with QUEUE_LOCK:
@@ -277,11 +292,15 @@ async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     SOURCES.download, url, DOWNLOAD_DIR, title_hint
                 )
                 DOWNLOAD_INDEX.record(url, platform, media)
-                finished.extend(item.path.name for item in media)
+                finished.extend(
+                    str(item.path.relative_to(DOWNLOAD_DIR)) for item in media
+                )
                 providers.update(item.provider for item in media)
                 for item in media:
                     if item.provider_notice and item.provider_notice not in provider_notices:
                         provider_notices.append(item.provider_notice)
+                    if item.notice and item.notice not in item_notices:
+                        item_notices.append(item.notice)
                 LOGGER.info(
                     "Completed item chat_id=%s index=%d files=%s",
                     chat_id,
@@ -299,6 +318,7 @@ async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if providers:
         lines.append(f"获取源：{'、'.join(sorted(providers))}")
     lines.extend(provider_notices)
+    lines.extend(item_notices)
     if finished:
         lines.extend(f"✓ {name}" for name in finished[:10])
         if len(finished) > 10:
@@ -322,7 +342,12 @@ async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 def build_application(token: str, health: PollingHealth) -> Application:
-    bot = TrackingExtBot(token)
+    bot = TrackingExtBot(
+        token,
+        get_updates_request=HTTPXRequest(
+            connection_pool_size=TELEGRAM_GET_UPDATES_CONNECTION_POOL_SIZE,
+        ),
+    )
     POLLING_HEALTH_BY_BOT[id(bot)] = health
     application = Application.builder().bot(bot).build()
     application.bot_data["polling_health"] = health
@@ -337,6 +362,18 @@ def build_application(token: str, health: PollingHealth) -> Application:
         name="polling-health-monitor",
     )
     return application
+
+
+def run_application(application: Application) -> None:
+    """Run one polling lifecycle without closing the reusable event loop."""
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        bootstrap_retries=-1,
+        # The watchdog deliberately starts a fresh application after a stalled
+        # connection. Keeping this loop open lets the next polling lifecycle
+        # reuse it instead of failing with "RuntimeError: Event loop is closed".
+        close_loop=False,
+    )
 
 
 def main() -> None:
@@ -354,10 +391,7 @@ def main() -> None:
         health = PollingHealth()
         application = build_application(token, health)
         try:
-            application.run_polling(
-                allowed_updates=Update.ALL_TYPES,
-                bootstrap_retries=-1,
-            )
+            run_application(application)
         finally:
             POLLING_HEALTH_BY_BOT.pop(id(application.bot), None)
 

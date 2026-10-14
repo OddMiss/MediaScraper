@@ -15,7 +15,7 @@
 - 声明稳定的平台名称 `name` 与允许匹配的域名集合 `hosts`；
 - `matches(url)` 仅接受本平台域名；
 - `download(url, destination, title_hint)` 返回 `list[DownloadedMedia]`；
-- 使用 `storage.available_path()` 生成文件名、使用 `storage.stream_to_file()` 保存媒体；
+- 使用 `storage.available_path()` 或 `storage.safe_stem()` 生成安全文件名、使用 `storage.stream_to_file()` 保存媒体；歌单等多文件来源可按来源标题创建子文件夹；
 - 解析失败时抛出面向用户的 `SourceError`，不要吞掉异常；
 - 在返回结果中填写实际处理服务的 `provider`。若切换服务，填写 `provider_notice`，机器人会将变化告知用户。
 

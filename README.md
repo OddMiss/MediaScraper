@@ -7,11 +7,13 @@
 当前已接入：
 
 - 小红书视频：`xiaohongshu.com`、`xhslink.com`、`xhslink.cn`
-
-机器人完成消息会始终标注实际使用的获取源。
 - 抖音视频：`douyin.com`、`v.douyin.com`、`iesdouyin.com`
 - 皮皮虾视频：`pipix.com`、`h5.pipix.com`、`pipixia.com`
 - TikTok 视频：`tiktok.com`、`vm.tiktok.com`、`vt.tiktok.com`、`tiktokv.com`
+- X（Twitter）视频：`x.com`、`twitter.com`（含其子域名）
+- 网易云音乐单曲与公开歌单：`music.163.com`
+
+机器人完成消息会标注实际使用的获取源。
 
 项目采用来源插件架构，后续可扩展图文、视频、音频或文字内容，不需要改动 Telegram 消息处理与下载队列。
 
@@ -28,7 +30,7 @@ Telegram 群消息
 
 同一条消息中的多个链接、不同用户发送的链接，都会按队列顺序依次处理，避免同时下载导致网络、平台或磁盘压力过大。
 
-每个成功下载的原始链接会写入 `downloads/index.json`，其中包含平台名称、下载时间和生成的文件名。同一链接再次出现时，机器人会跳过下载并在结果中提示，避免重复保存；仅在文件完整保存成功后才会写入索引。
+每个成功下载的原始链接会写入 `downloads/index.json`，其中包含平台名称、下载时间和生成的文件相对路径。同一链接再次出现时，机器人会跳过下载并在结果中提示，避免重复保存；仅在文件完整保存成功后才会写入索引。
 
 ## 安装与启动
 
@@ -81,7 +83,7 @@ Python 业务日志会记录：
 - 收到消息后的链接总数、白名单命中数、无效链接数及未授权访问；
 - 批次进入队列、开始处理、每条链接处理完成或失败；
 - URL 被路由到哪个来源插件；
-- HelloTik / SaveTik 解析请求与结果摘要（媒体数量、是否取得标题）；
+- HelloTik / SaveTik / X-Twitter-Downloader / 网易云音乐解析请求与结果摘要（媒体数量、是否取得标题）；
 - 文件下载开始、HTTP 状态、声明大小、实际写入字节数、保存的文件名；
 - 解析、网络或本地写入异常的错误信息与 Python 堆栈。
 
@@ -109,6 +111,21 @@ https://xhslink.cn/o/67C7RoWf5fZ
 7.64 复制打开抖音，看看【作者的作品】 https://v.douyin.com/39SY8WZGBH8/ :8pm Z@z.te FhO:/ 04/22
 ```
 
+X（Twitter）帖文链接也可以直接发送，例如：
+
+```text
+https://x.com/xixikawaii/status/2109512571388858616?s=20
+```
+
+网易云音乐支持单曲和公开歌单链接，例如：
+
+```text
+https://music.163.com/song?id=28708061
+https://music.163.com/playlist?id=17974257275
+```
+
+只有音乐使用 `歌手 - 歌曲名` 作为文件名，视频及其他媒体继续使用各平台原有的作品标题或后备命名规则。歌单以歌单名称创建子文件夹，例如 `downloads/流言侦探/恩雅NYA - 仪式.mp3`。实际扩展名按音频格式确定。网易云只提供试听时，会以歌手和歌名搜索 [IN音乐网](https://inmp3.com/)；仅在歌名、歌手均精确一致、详情页也核对一致时才下载 MP3。同名合唱、翻唱、现场等版本不作为匹配；若有多个合格结果，只选搜索排序最靠前的一条。未找到精确匹配时仍跳过，并在回复中说明；歌单会汇报跳过数量。歌单若因网络等错误中断，重新发送链接会继续处理，已保存的同名曲目不会重复下载。
+
 机器人会回复处理进度与下载结果。为使机器人能收到普通群消息，请将其设为群管理员；否则 Telegram 的群隐私模式可能只转发命令消息。
 
 链接采用白名单机制。当前仅允许上述已接入平台的域名；不在白名单内的链接会被提示为无效。白名单会随已注册的平台插件自动更新。
@@ -121,7 +138,7 @@ https://xhslink.cn/o/67C7RoWf5fZ
 bot.py                 Telegram 消息入口、权限校验、全局串行队列
 url_tools.py           从普通文本提取并去重 HTTP(S) 链接
 source_registry.py     按 URL 选择已注册的平台插件
-media_types.py         插件通用接口与视频/图片/文字结果类型
+media_types.py         插件通用接口与视频/音频/图片/文字结果类型
 storage.py             安全命名、同名避让、通用流式保存
 download_index.py      已成功下载链接的持久化去重索引
 downloader.py          旧版单一小红书调用接口的兼容入口
@@ -129,6 +146,11 @@ xiaohongshu_source.py  小红书来源插件
 douyin_source.py        抖音来源插件
 pipixia_source.py       皮皮虾来源插件
 tiktok_source.py        TikTok 来源插件
+x_twitter_source.py     X（Twitter）来源插件
+x_twitter_client.py     X-Twitter-Downloader 网页解析客户端
+netease_music_source.py 网易云音乐来源插件
+netease_client.py       网易云音乐网页解析客户端
+inmp3_client.py         试听歌曲的精确匹配与 MP3 播放地址解析客户端
 savetik_client.py       SaveTik 网页解析客户端
 hellotik_client.py     HelloTik 多平台解析协议客户端
 videoscraper.bat       Windows 启动入口
@@ -206,7 +228,7 @@ SOURCES = SourceRegistry([
 
 ### 图文与文字内容
 
-一个插件可以返回多个结果，所以图文笔记可依次返回多张图片与视频；纯文字可先将内容写入 `.txt`，再返回 `MediaKind.TEXT`：
+一个插件可以返回多个结果，所以图文笔记可依次返回多张图片与视频，歌单可返回多首 `MediaKind.AUDIO`；纯文字可先将内容写入 `.txt`，再返回 `MediaKind.TEXT`：
 
 ```python
 return [
@@ -220,7 +242,9 @@ return [
 
 ## 当前平台实现
 
-小红书、抖音与皮皮虾来源插件通过 `hellotik_client.py` 解析公开分享链接；TikTok 来源插件通过 `savetik_client.py` 调用 SaveTik 网页的公开解析接口。两类插件都会将返回的视频 CDN 地址保存至本地。TikTok 支持完整作品链接及 `vm.tiktok.com`、`vt.tiktok.com` 等短链。
+小红书、抖音与皮皮虾来源插件通过 `hellotik_client.py` 解析公开分享链接；TikTok 来源插件通过 `savetik_client.py` 调用 SaveTik 网页的公开解析接口；X（Twitter）来源插件通过 `x_twitter_client.py` 调用 X-Twitter-Downloader 的 `/api/parse-video` 接口。解析后的视频 CDN 地址会保存至本地。TikTok 支持完整作品链接及 `vm.tiktok.com`、`vt.tiktok.com` 等短链。X（Twitter）若返回多档画质，会为每个视频选择最高分辨率的 MP4。
+
+网易云音乐插件将 [netease-cloud-music-dl](https://github.com/codezjx/netease-cloud-music-dl) 的公开网页解析流程改造为独立客户端，沿用其 MIT 许可。它无需登录，优先下载网易云提供的完整音频；试听专用歌曲才尝试 IN音乐网备用来源。备用来源使用网页搜索结果和歌曲页面公开的播放地址，不需要单独配置。网页结构、播放地址或音乐版权与可用性变化时，备用下载也可能失效。
 
 HelloTik 网页协议可能更新；若出现“未取得解析票据”或解密错误，需要更新 `hellotik_client.py` 内的当前协议字段。
 

@@ -38,14 +38,20 @@ class DownloadIndex:
             payload["downloads"][source_url] = {
                 "platform": platform,
                 "downloaded_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(),
-                "files": [item.path.name for item in media],
+                "files": [self._relative_file_name(item.path) for item in media],
             }
             self._write(payload)
         LOGGER.info(
             "Recorded successful download platform=%s files=%s",
             platform,
-            [item.path.name for item in media],
+            [self._relative_file_name(item.path) for item in media],
         )
+
+    def _relative_file_name(self, path: Path) -> str:
+        try:
+            return path.resolve().relative_to(self.path.parent.resolve()).as_posix()
+        except ValueError:
+            return path.name
 
     def _read(self) -> dict[str, object]:
         try:

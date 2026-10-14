@@ -10,6 +10,7 @@ from typing import Protocol
 
 class MediaKind(StrEnum):
     VIDEO = "video"
+    AUDIO = "audio"
     IMAGE = "image"
     TEXT = "text"
 
@@ -22,6 +23,7 @@ class DownloadedMedia:
     source_url: str
     provider: str = "未注明"
     provider_notice: str | None = None
+    notice: str | None = None
 
 
 class SourceError(RuntimeError):
