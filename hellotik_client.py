@@ -41,6 +41,10 @@ class _Profile:
 class HelloTikClient:
     BASE_URL = "https://www.hellotik.app"
     PROFILE = _Profile()
+    PAGE_PATH = "/zh/rednote"
+    # The current public endpoint still accepts the browser envelope at v1;
+    # its newly added entitlement is carried inside that encrypted payload.
+    REQUEST_ENCRYPTION_VERSION = 1
     # This is the response-decryption value embedded in HelloTik's current
     # browser bundle; it is distinct from the response field named ``key``.
     OUTPUT_DECRYPTION_KEY = "93838338562359368888868323563256"
@@ -74,8 +78,14 @@ class HelloTikClient:
             "totalSuccessCount": "0",
             "firstSuccessDate": None,
             "geoipIp": "",
+            "pagePath": self.PAGE_PATH,
+            "externalRequestId": str(uuid.uuid4()),
         }
+        payload["browserQuota"] = self._browser_quota(payload)
         LOGGER.info("HelloTik parse requested")
+        quote_token, quality_tier = self._get_entitlement(payload)
+        payload["quoteToken"] = quote_token
+        payload["qualityTier"] = quality_tier
         ticket = self._get_ticket(source_url)
         body = self._encrypt_request(payload, ticket)
         response = self.session.post(
@@ -100,6 +110,52 @@ class HelloTikClient:
             bool(str(data.get("title") or "").strip()),
         )
         return data
+
+    def _get_entitlement(self, payload: dict[str, Any]) -> tuple[str, str]:
+        """Get the short-lived page entitlement required by the current web flow."""
+        response = self.session.post(
+            f"{self.BASE_URL}/api/parse-entitlement-status",
+            json={
+                **payload,
+                "request_url": payload["requestURL"],
+                "page_path": payload["pagePath"],
+            },
+            timeout=self.timeout,
+        )
+        result = self._json(response)
+        if not response.ok:
+            raise HelloTikError(self._error_message(result, response.status_code))
+
+        quote_token = result.get("quoteToken")
+        if not isinstance(quote_token, str) or not quote_token:
+            raise HelloTikError("未取得解析授权；网页协议可能已经更新。")
+        details = result.get("data")
+        if not isinstance(details, dict):
+            details = {}
+        if details.get("showQuote"):
+            raise HelloTikError("解析服务要求在网页确认本次解析，机器人暂时无法自动处理。")
+        quality_tier = details.get("defaultTier")
+        return quote_token, quality_tier if isinstance(quality_tier, str) else "hd"
+
+    @staticmethod
+    def _browser_quota(payload: dict[str, Any]) -> dict[str, int | bool]:
+        """Match HelloTik's public browser quota metadata for a fresh session."""
+        def count(value: Any) -> int:
+            try:
+                return max(0, int(value))
+            except (TypeError, ValueError):
+                return 0
+
+        daily_used = count(payload.get("successCount"))
+        total_success_count = count(payload.get("totalSuccessCount"))
+        daily_limit = 10 if total_success_count < 30 else 6 if total_success_count < 80 else 5
+        is_mobile = payload.get("isMobile") in (True, "true")
+        return {
+            "rewardRequired": not is_mobile and daily_used >= daily_limit,
+            "dailyUsed": daily_used,
+            "dailyLimit": daily_limit,
+            "totalSuccessCount": total_success_count,
+        }
 
     def _get_ticket(self, source_url: str) -> tuple[str, str]:
         LOGGER.debug("Requesting HelloTik parse ticket")
@@ -131,7 +187,7 @@ class HelloTikClient:
             self.PROFILE.request_ticket_key: parse_ticket,
             self.PROFILE.request_payload_key: b64(encrypted),
             self.PROFILE.request_iv_key: b64(iv),
-            self.PROFILE.request_version_key: 1,
+            self.PROFILE.request_version_key: self.REQUEST_ENCRYPTION_VERSION,
         }
 
     @staticmethod
@@ -172,6 +228,8 @@ class HelloTikClient:
 
     @staticmethod
     def _error_message(result: dict[str, Any], status_code: int | None) -> str:
+        if result.get("status") == 403:
+            return "解析服务无法读取该小红书内容；内容可能已删除、设为私密或暂时不可见。"
         message = result.get("error") or result.get("message") or result.get("msg")
         if message:
             return str(message)
