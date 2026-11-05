@@ -3,13 +3,14 @@ import bot
 from polling_health import PollingHealth
 
 
-def test_polling_uses_a_second_connection_for_recovery() -> None:
+def test_polling_keeps_spare_connections_for_recovery() -> None:
     application = bot.build_application("123:ABC", PollingHealth())
     try:
         request = application.bot._request[0]
         pool = request._client._transport._pool
 
         assert pool._max_connections == bot.TELEGRAM_GET_UPDATES_CONNECTION_POOL_SIZE
+        assert request._client.timeout.pool == bot.TELEGRAM_GET_UPDATES_POOL_TIMEOUT_SECONDS
     finally:
         bot.POLLING_HEALTH_BY_BOT.pop(id(application.bot), None)
 

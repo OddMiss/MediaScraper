@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from telegram import Message, Update
-from telegram.error import NetworkError
+from telegram.error import NetworkError, TimedOut
 from telegram.ext import Application, ContextTypes, ExtBot, MessageHandler, filters
 from telegram.request import HTTPXRequest
 from dotenv import load_dotenv
@@ -78,6 +78,26 @@ class _TelegramNetworkLogFilter(logging.Filter):
             record.args = ()
             record.exc_info = None
             record.exc_text = None
+        elif (
+            record.name == "asyncio"
+            and record.getMessage().startswith("Task exception was never retrieved")
+            and record.exc_info
+            and isinstance(record.exc_info[1], TimedOut)
+            and "connection pool" in str(record.exc_info[1]).lower()
+        ):
+            # A stalled long-poll can be cancelled at the same time its next
+            # retry waits for a pool slot. The watchdog immediately rebuilds
+            # that connection, so this expected shutdown race needs only a
+            # concise warning rather than asyncio's full task traceback.
+            record.levelno = logging.WARNING
+            record.levelname = "WARNING"
+            record.msg = (
+                "Telegram polling task ended while waiting for a reconnect "
+                "connection; continuing with the restart."
+            )
+            record.args = ()
+            record.exc_info = None
+            record.exc_text = None
         return True
 
 
@@ -113,10 +133,10 @@ POLLING_HEALTH_BY_BOT: dict[int, PollingHealth] = {}
 POLLING_HEALTH_CHECK_SECONDS = 30
 POLLING_STALL_SECONDS = 120
 POLLING_RESTART_DELAY_SECONDS = 5
-# Telegram gives getUpdates a one-connection pool by default.  Keep a second
-# connection available so the updater can finish an interrupted long poll
-# while its shutdown/restart request is in progress.
-TELEGRAM_GET_UPDATES_CONNECTION_POOL_SIZE = 2
+# Telegram gives getUpdates a one-connection pool by default. Keep several
+# slots available for a stuck long poll, its retry, and shutdown cleanup.
+TELEGRAM_GET_UPDATES_CONNECTION_POOL_SIZE = 4
+TELEGRAM_GET_UPDATES_POOL_TIMEOUT_SECONDS = 10
 TELEGRAM_MESSAGE_RETRY_ATTEMPTS = 3
 TELEGRAM_MESSAGE_RETRY_DELAY_SECONDS = 2
 Result = TypeVar("Result")
@@ -346,6 +366,7 @@ def build_application(token: str, health: PollingHealth) -> Application:
         token,
         get_updates_request=HTTPXRequest(
             connection_pool_size=TELEGRAM_GET_UPDATES_CONNECTION_POOL_SIZE,
+            pool_timeout=TELEGRAM_GET_UPDATES_POOL_TIMEOUT_SECONDS,
         ),
     )
     POLLING_HEALTH_BY_BOT[id(bot)] = health
