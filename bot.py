@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
+import hashlib
 import logging
 import os
 import time
@@ -151,6 +153,47 @@ class TrackingExtBot(ExtBot):
         if health:
             health.record_success()
         return updates
+
+
+class BotInstanceLock:
+    """Windows mutex that prevents two copies of the same bot token polling."""
+
+    _ALREADY_EXISTS = 183
+
+    def __init__(self, token: str) -> None:
+        token_id = hashlib.sha256(token.encode("utf-8")).hexdigest()[:24]
+        self._name = f"Local\\MediaScraper-{token_id}"
+        self._handle: int | None = None
+
+    def acquire(self) -> bool:
+        """Return false when another process already owns this token's mutex."""
+        if os.name != "nt":
+            return True
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_mutex = kernel32.CreateMutexW
+        create_mutex.argtypes = (ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p)
+        create_mutex.restype = ctypes.c_void_p
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = (ctypes.c_void_p,)
+        close_handle.restype = ctypes.c_bool
+
+        ctypes.set_last_error(0)
+        handle = create_mutex(None, False, self._name)
+        if not handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        if ctypes.get_last_error() == self._ALREADY_EXISTS:
+            close_handle(handle)
+            return False
+        self._handle = handle
+        return True
+
+    def release(self) -> None:
+        if self._handle is None or os.name != "nt":
+            return
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CloseHandle(ctypes.c_void_p(self._handle))
+        self._handle = None
 
 
 async def monitor_polling_health(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -401,29 +444,43 @@ def main() -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise RuntimeError("请先设置 TELEGRAM_BOT_TOKEN 环境变量。")
-    LOGGER.info(
-        "Starting bot download_dir=%s log_file=%s sources=%s access_restricted=%s",
-        DOWNLOAD_DIR,
-        LOG_PATH,
-        [source.name for source in SOURCES.sources],
-        bool(ALLOWED_USER_IDS),
-    )
-    while True:
-        health = PollingHealth()
-        application = build_application(token, health)
-        try:
-            run_application(application)
-        finally:
-            POLLING_HEALTH_BY_BOT.pop(id(application.bot), None)
+    instance_lock = BotInstanceLock(token)
+    try:
+        if not instance_lock.acquire():
+            LOGGER.warning(
+                "Another bot process is already polling with this Telegram token; exiting."
+            )
+            return
+    except OSError as exc:
+        LOGGER.error("Could not acquire the single-instance lock: %s", exc)
+        return
 
-        if not health.restart_requested:
-            LOGGER.info("Bot process stopped")
-            break
-        LOGGER.warning(
-            "Restarting Telegram application in %s seconds.",
-            POLLING_RESTART_DELAY_SECONDS,
+    try:
+        LOGGER.info(
+            "Starting bot download_dir=%s log_file=%s sources=%s access_restricted=%s",
+            DOWNLOAD_DIR,
+            LOG_PATH,
+            [source.name for source in SOURCES.sources],
+            bool(ALLOWED_USER_IDS),
         )
-        time.sleep(POLLING_RESTART_DELAY_SECONDS)
+        while True:
+            health = PollingHealth()
+            application = build_application(token, health)
+            try:
+                run_application(application)
+            finally:
+                POLLING_HEALTH_BY_BOT.pop(id(application.bot), None)
+
+            if not health.restart_requested:
+                LOGGER.info("Bot process stopped")
+                break
+            LOGGER.warning(
+                "Restarting Telegram application in %s seconds.",
+                POLLING_RESTART_DELAY_SECONDS,
+            )
+            time.sleep(POLLING_RESTART_DELAY_SECONDS)
+    finally:
+        instance_lock.release()
 
 
 if __name__ == "__main__":
