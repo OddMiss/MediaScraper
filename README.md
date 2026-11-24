@@ -12,6 +12,7 @@
 - TikTok 视频：`tiktok.com`、`vm.tiktok.com`、`vt.tiktok.com`、`tiktokv.com`
 - X（Twitter）视频：`x.com`、`twitter.com`（含其子域名）
 - 网易云音乐单曲与公开歌单：`music.163.com`
+- IN音乐网单曲：`inmp3.com/song/<歌曲编号>`
 
 机器人完成消息会标注实际使用的获取源。
 
@@ -124,7 +125,13 @@ https://music.163.com/song?id=28708061
 https://music.163.com/playlist?id=17974257275
 ```
 
-只有音乐使用 `歌手 - 歌曲名` 作为文件名，视频及其他媒体继续使用各平台原有的作品标题或后备命名规则。歌单以歌单名称创建子文件夹，例如 `downloads/流言侦探/恩雅NYA - 仪式.mp3`。实际扩展名按音频格式确定。网易云只提供试听时，会以歌手和歌名搜索 [IN音乐网](https://inmp3.com/)；仅在歌名、歌手均精确一致、详情页也核对一致时才下载 MP3。同名合唱、翻唱、现场等版本不作为匹配；若有多个合格结果，只选搜索排序最靠前的一条。未找到精确匹配时仍跳过，并在回复中说明；歌单会汇报跳过数量。歌单若因网络等错误中断，重新发送链接会继续处理，已保存的同名曲目不会重复下载。
+IN音乐网单曲页也可以直接发送，例如：
+
+```text
+https://inmp3.com/song/7964301
+```
+
+只有音乐使用 `歌手 - 歌曲名` 作为文件名，视频及其他媒体继续使用各平台原有的作品标题或后备命名规则。歌单以歌单名称创建子文件夹，例如 `downloads/流言侦探/恩雅NYA - 仪式.mp3`。实际扩展名按音频格式确定。网易云只提供试听时，会以歌手和歌名搜索 [IN音乐网](https://inmp3.com/)；仅在歌名、歌手均精确一致、详情页也核对一致时才下载 MP3。同名合唱、翻唱、现场等版本不作为匹配；若有多个合格结果，只选搜索排序最靠前的一条。未找到精确匹配时仍跳过，并在回复中说明；歌单会汇报跳过数量。IN音乐网的公开单曲页也可直接下载。歌单若因网络等错误中断，重新发送链接会继续处理，已保存的同名曲目不会重复下载。
 
 机器人会回复处理进度与下载结果。为使机器人能收到普通群消息，请将其设为群管理员；否则 Telegram 的群隐私模式可能只转发命令消息。
 
@@ -151,6 +158,7 @@ x_twitter_client.py     X-Twitter-Downloader 网页解析客户端
 netease_music_source.py 网易云音乐来源插件
 netease_client.py       网易云音乐网页解析客户端
 inmp3_client.py         试听歌曲的精确匹配与 MP3 播放地址解析客户端
+inmp3_source.py         IN音乐网单曲来源插件
 savetik_client.py       SaveTik 网页解析客户端
 hellotik_client.py     HelloTik 多平台解析协议客户端
 videoscraper.bat       Windows 启动入口
@@ -243,7 +251,7 @@ return [
 
 小红书、抖音与皮皮虾来源插件通过 `hellotik_client.py` 解析公开分享链接；TikTok 来源插件通过 `savetik_client.py` 调用 SaveTik 网页的公开解析接口；X（Twitter）来源插件通过 `x_twitter_client.py` 调用 X-Twitter-Downloader 的 `/api/parse-video` 接口。解析后的视频 CDN 地址会保存至本地。TikTok 支持完整作品链接及 `vm.tiktok.com`、`vt.tiktok.com` 等短链。X（Twitter）若返回多档画质，会为每个视频选择最高分辨率的 MP4。
 
-网易云音乐插件将 [netease-cloud-music-dl](https://github.com/codezjx/netease-cloud-music-dl) 的公开网页解析流程改造为独立客户端，沿用其 MIT 许可。它无需登录，优先下载网易云提供的完整音频；试听专用歌曲才尝试 IN音乐网备用来源。备用来源使用网页搜索结果和歌曲页面公开的播放地址，不需要单独配置。网页结构、播放地址或音乐版权与可用性变化时，备用下载也可能失效。
+网易云音乐插件将 [netease-cloud-music-dl](https://github.com/codezjx/netease-cloud-music-dl) 的公开网页解析流程改造为独立客户端，沿用其 MIT 许可。它无需登录，优先下载网易云提供的完整音频；试听专用歌曲才尝试 IN音乐网备用来源。IN音乐网也支持直接发送公开单曲页。两种方式都使用网页公开的歌曲元数据和播放地址，不需要单独配置。网页结构、播放地址或音乐版权与可用性变化时，备用下载也可能失效。
 
 HelloTik 网页协议可能更新；若出现“未取得解析票据”或解密错误，需要更新 `hellotik_client.py` 内的当前协议字段。
 

@@ -14,7 +14,9 @@ import requests
 
 LOGGER = logging.getLogger(__name__)
 BASE_URL = "https://inmp3.com"
-_CODE = re.compile(r"\blet\s+code\s*=\s*['\"]([A-Za-z0-9+/=]+)['\"]")
+_CODE = re.compile(
+    r"\b(?:let\s+code|const\s+encodedUrl)\s*=\s*['\"]([A-Za-z0-9+/=]+)['\"]"
+)
 _BLOCKED_VERSION = re.compile(r"(?:翻唱|伴奏|现场|live|cover|remix|dj版|演唱会)", re.I)
 
 
@@ -33,6 +35,14 @@ class SearchResult:
 @dataclass(frozen=True)
 class ExactTrack:
     rid: int
+    audio_url: str
+
+
+@dataclass(frozen=True)
+class InMp3Track:
+    rid: int
+    title: str
+    artist: str
     audio_url: str
 
 
@@ -120,12 +130,28 @@ class InMp3Client:
             return None
         # Site order is significant: only the first exact result is eligible.
         result = candidates[0]
-        response = self.session.get(f"{BASE_URL}/song/{result.rid}/", timeout=self.timeout)
+        track = self.song(result.rid)
+        if not _same(track.title, title) or not _same(track.artist, artist):
+            raise InMp3Error("歌曲详情与搜索结果不一致。")
+        LOGGER.info("IN音乐网 exact track selected rid=%d artist=%s title=%s", result.rid, artist, title)
+        return ExactTrack(result.rid, track.audio_url)
+
+    def song(self, rid: int) -> InMp3Track:
+        """Read one public IN音乐网 song page and its MP3 playback URL."""
+        if rid <= 0:
+            raise InMp3Error("歌曲编号无效。")
+        response = self.session.get(f"{BASE_URL}/song/{rid}/", timeout=self.timeout)
         response.raise_for_status()
-        self._verify_detail(response.text, artist, title)
-        code = _CODE.search(response.text)
+        title, artist = self._detail_metadata(response.text)
+        audio_url = self._audio_url(response.text)
+        LOGGER.info("IN音乐网 song resolved rid=%d artist=%s title=%s", rid, artist, title)
+        return InMp3Track(rid, title, artist, audio_url)
+
+    @staticmethod
+    def _audio_url(html: str) -> str:
+        code = _CODE.search(html)
         if not code:
-            raise InMp3Error("精确匹配歌曲的页面没有 MP3 播放地址。")
+            raise InMp3Error("歌曲页面没有 MP3 播放地址。")
         try:
             audio_url = base64.b64decode(code.group(1), validate=True).decode("utf-8")
         except (ValueError, UnicodeDecodeError) as exc:
@@ -134,20 +160,29 @@ class InMp3Client:
         hostname = (parsed.hostname or "").lower()
         if parsed.scheme != "https" or not (hostname == "kuwo.cn" or hostname.endswith(".kuwo.cn")) or not parsed.path.lower().endswith(".mp3"):
             raise InMp3Error("MP3 播放地址不在允许的音频域名内。")
-        LOGGER.info("IN音乐网 exact track selected rid=%d artist=%s title=%s", result.rid, artist, title)
-        return ExactTrack(result.rid, audio_url)
+        return audio_url
 
     @staticmethod
-    def _verify_detail(html: str, artist: str, title: str) -> None:
+    def _detail_metadata(html: str) -> tuple[str, str]:
         for raw in re.findall(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html, re.I | re.S):
             try:
                 data = json.loads(raw)
             except ValueError:
                 continue
-            if data.get("@type") != "MusicRecording":
+            entries = data.get("@graph", [data]) if isinstance(data, dict) else data
+            if isinstance(entries, dict):
+                entries = [entries]
+            if not isinstance(entries, list):
                 continue
-            actual_artist = (data.get("byArtist") or {}).get("name", "")
-            if not _same(str(data.get("name") or ""), title) or not _same(str(actual_artist), artist):
-                raise InMp3Error("歌曲详情与搜索结果不一致。")
-            return
+            for entry in entries:
+                if not isinstance(entry, dict) or entry.get("@type") != "MusicRecording":
+                    continue
+                by_artist = entry.get("byArtist") or {}
+                if isinstance(by_artist, list):
+                    by_artist = by_artist[0] if by_artist else {}
+                artist = by_artist.get("name", "") if isinstance(by_artist, dict) else ""
+                title = str(entry.get("name") or "").strip()
+                artist = str(artist).strip()
+                if title and artist:
+                    return title, artist
         raise InMp3Error("歌曲详情缺少可核对的歌名和歌手。")

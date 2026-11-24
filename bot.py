@@ -20,6 +20,7 @@ from telegram.request import HTTPXRequest
 from dotenv import load_dotenv
 
 from download_index import DownloadIndex
+from inmp3_source import InMp3Source
 from media_types import SourceError
 from polling_health import PollingHealth
 from source_registry import SourceRegistry
@@ -128,6 +129,7 @@ SOURCES = SourceRegistry(
         TikTokSource(),
         XTwitterSource(),
         NeteaseMusicSource(),
+        InMp3Source(),
     ]
 )
 QUEUE_LOCK = asyncio.Lock()

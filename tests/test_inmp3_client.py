@@ -25,8 +25,8 @@ def test_first_exact_result_excludes_duet_cover_and_live(monkeypatch) -> None:
     code = base64.b64encode(audio_url.encode()).decode()
     detail_html = (
         '<script type="application/ld+json">'
-        '{"@type":"MusicRecording","name":"不潮不用花钱",'
-        '"byArtist":{"name":"林俊杰"}}</script>'
+        '{"@graph":[{"@type":"MusicRecording","name":"不潮不用花钱",'
+        '"byArtist":{"name":"林俊杰"}}]}</script>'
         f'<script>let code = "{code}";</script>'
     )
     requested = []
@@ -55,3 +55,28 @@ def test_no_exact_result_never_opens_song_page(monkeypatch) -> None:
     monkeypatch.setattr(client.session, "get", fake_get)
     assert client.find_exact("林俊杰", "不潮不用花钱") is None
     assert len(requested) == 1
+
+
+def test_song_reads_current_detail_metadata_and_encoded_url(monkeypatch) -> None:
+    audio_url = "https://kw-er.kuwo.cn/resource/test.mp3"
+    encoded_url = base64.b64encode(audio_url.encode()).decode()
+    detail_html = (
+        '<script type="application/ld+json">'
+        '{"@graph":[{"@type":"MusicRecording","name":"晚风心里吹",'
+        '"byArtist":{"name":"阿梨&小花"}}]}</script>'
+        f'<script>const encodedUrl = "{encoded_url}";</script>'
+    )
+
+    client = InMp3Client()
+    monkeypatch.setattr(
+        client.session,
+        "get",
+        lambda url, timeout: SimpleNamespace(text=detail_html, raise_for_status=lambda: None),
+    )
+
+    result = client.song(7964301)
+
+    assert result.rid == 7964301
+    assert result.title == "晚风心里吹"
+    assert result.artist == "阿梨&小花"
+    assert result.audio_url == audio_url
